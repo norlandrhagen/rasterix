@@ -1,5 +1,6 @@
 from .options import get_options, set_options
 from .raster_index import RasterIndex, assign_index
+from .rasterize.sources import GeoParquetSource
 
 
 def _get_version():
@@ -13,4 +14,4 @@ def _get_version():
 
 __version__ = _get_version()
 
-__all__ = ["RasterIndex", "assign_index", "set_options", "get_options"]
+__all__ = ["RasterIndex", "assign_index", "set_options", "get_options", "GeoParquetSource"]

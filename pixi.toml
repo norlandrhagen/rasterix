@@ -49,6 +49,11 @@ rasterio = "*"
 [feature.with-rusterize.pypi-dependencies]
 rusterize = ">=0.7.1"
 
+[feature.with-duckdb.pypi-dependencies]
+duckdb = "*"
+polars = "*"
+polars-st = "*"
+
 # ===== Docs feature =====
 
 [feature.docs.dependencies]
@@ -98,5 +103,6 @@ test-py311 = ["test-base", "with-rasterio", "py311"]
 test-py314 = ["test-base", "with-rasterio", "py314"]
 test-rusterize-py311 = ["test-base", "with-rusterize", "py311"]
 test-rusterize-py314 = ["test-base", "with-rusterize", "py314"]
+test-duckdb-py311 = ["test-base", "with-rusterize", "with-duckdb", "py311"]
 dev = ["test-base", "with-rasterio", "py314", "dev-tools"]
 docs = ["docs"]

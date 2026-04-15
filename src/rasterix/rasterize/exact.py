@@ -380,6 +380,50 @@ def coverage(
 # ============================================================================
 
 
+def _rasterize_with_exact(
+    geometries,
+    values: np.ndarray,
+    *,
+    shape: tuple[int, int],
+    affine,
+    merge_alg: str,
+    fill: Any,
+) -> np.ndarray:
+    """Core exactextract rasterization burning explicit per-geometry *values*.
+
+    Shared by :func:`rasterize_geometries` (which derives values from an offset)
+    and the DuckDB chunk path (which supplies actual feature IDs).
+    """
+    gdf = gpd.GeoDataFrame(geometry=list(geometries), crs="EPSG:4326")
+    raster = affine_to_raster_source(affine, shape, srs_wkt=gdf.crs.to_wkt())
+    result = exact_extract(
+        rast=raster,
+        vec=gdf,
+        ops=["cell_id", "coverage(coverage_weight=none)"],
+        output="pandas",
+    )
+
+    out = np.full(shape, fill, dtype=values.dtype)
+
+    cell_id_arrays = result.cell_id.values
+    lens = np.array([len(c) for c in cell_id_arrays])
+    if lens.sum() == 0:
+        return out
+
+    all_cell_ids = np.concatenate([c for c in cell_id_arrays if len(c) > 0])
+    # np.repeat handles zero-length entries correctly — values and lens stay aligned.
+    all_values = np.repeat(values, lens)
+
+    if merge_alg == "replace":
+        np.put(out, all_cell_ids, all_values)
+    elif merge_alg == "add":
+        np.add.at(out.ravel(), all_cell_ids, all_values)
+    else:
+        raise ValueError(f"Unsupported merge_alg: {merge_alg!r}. Must be 'replace' or 'add'.")
+
+    return out
+
+
 def rasterize_geometries(
     geometries,
     *,
@@ -425,7 +469,6 @@ def rasterize_geometries(
     np.ndarray
         Rasterized array with shape (nrows, ncols).
     """
-
     if all_touched:
         raise NotImplementedError(
             "all_touched=True is not supported by the exactextract engine. "
@@ -435,42 +478,10 @@ def rasterize_geometries(
     if len(geometries) == 0:
         return np.full(shape, fill, dtype=dtype)
 
-    # Create GeoDataFrame (exactextract requires it)
-    # Use a dummy CRS - exactextract needs one but the algorithm doesn't depend on it
-    gdf = gpd.GeoDataFrame(geometry=list(geometries), crs="EPSG:4326")
-
-    # Use exactextract to get coverage (binary mode for efficiency)
-    raster = affine_to_raster_source(affine, shape, srs_wkt=gdf.crs.to_wkt())
-    result = exact_extract(
-        rast=raster,
-        vec=gdf,
-        ops=["cell_id", "coverage(coverage_weight=none)"],
-        output="pandas",
+    values = np.arange(len(geometries), dtype=dtype) + offset
+    return _rasterize_with_exact(
+        geometries, values, shape=shape, affine=affine, merge_alg=merge_alg, fill=fill
     )
-
-    # Initialize output with fill value
-    out = np.full(shape, fill, dtype=dtype)
-
-    # Vectorized merging: concatenate all cell_ids and corresponding values
-    cell_id_arrays = result.cell_id.values
-    lens = np.array([len(c) for c in cell_id_arrays])
-    if lens.sum() == 0:
-        return out
-
-    all_cell_ids = np.concatenate([c for c in cell_id_arrays if len(c) > 0])
-    all_values = np.repeat(np.arange(len(geometries), dtype=dtype) + offset, lens)
-
-    # Process based on merge algorithm
-    if merge_alg == "replace":
-        # Later geometries overwrite earlier ones (last write wins)
-        np.put(out, all_cell_ids, all_values)
-    elif merge_alg == "add":
-        # Sum values where geometries overlap (unbuffered addition)
-        np.add.at(out.ravel(), all_cell_ids, all_values)
-    else:
-        raise ValueError(f"Unsupported merge_alg: {merge_alg}. Must be 'replace' or 'add'.")
-
-    return out
 
 
 def dask_rasterize_wrapper(

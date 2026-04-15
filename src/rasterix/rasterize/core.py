@@ -10,9 +10,11 @@ import xarray as xr
 
 from ..raster_index import RasterIndex
 from ..utils import get_affine, get_grid_mapping_var
+from .sources import GeoParquetSource
 from .utils import XAXIS, YAXIS, clip_to_bbox, is_in_memory, prepare_for_dask
 
 if TYPE_CHECKING:
+    import dask.array
     import dask_geopandas
     from affine import Affine
 
@@ -137,6 +139,49 @@ def _normalize_merge_alg(merge_alg: str, engine: Engine) -> Any:
         return translation.get(merge_alg, merge_alg)
 
 
+def _rasterize_with_duckdb(
+    obj: xr.Dataset | xr.DataArray,
+    source: GeoParquetSource,
+    *,
+    affine,
+    engine: Engine,
+    xdim: str,
+    ydim: str,
+    all_touched: bool,
+    merge_alg: str,
+) -> dask.array.Array:
+    """Rasterize using per-chunk DuckDB spatial queries.
+
+    Always returns a dask array.  If *obj* is not chunked it is treated as a
+    single spatial chunk.
+    """
+    import dask.array as da
+    from dask.array import map_blocks
+
+    from .duckdb import duckdb_chunk
+
+    chunks_y = obj.chunksizes.get(ydim) or (obj.sizes[ydim],)
+    chunks_x = obj.chunksizes.get(xdim) or (obj.sizes[xdim],)
+
+    # Dummy template — map_blocks uses its shape/chunks; values are ignored.
+    template = da.empty(
+        (obj.sizes[ydim], obj.sizes[xdim]),
+        chunks=(chunks_y, chunks_x),
+        dtype=np.int32,
+    )
+    return map_blocks(
+        duckdb_chunk,
+        template,
+        dtype=np.int32,
+        meta=np.array([], dtype=np.int32),
+        source=source,
+        raster_affine=affine,
+        engine=engine,
+        all_touched=all_touched,
+        merge_alg=merge_alg,
+    )
+
+
 def replace_values(array: np.ndarray, to, *, from_=0) -> np.ndarray:
     """Replace fill values and adjust offsets after dask rasterization."""
     mask = array == from_
@@ -147,7 +192,7 @@ def replace_values(array: np.ndarray, to, *, from_=0) -> np.ndarray:
 
 def rasterize(
     obj: xr.Dataset | xr.DataArray,
-    geometries: gpd.GeoDataFrame | dask_geopandas.GeoDataFrame,
+    geometries: gpd.GeoDataFrame | dask_geopandas.GeoDataFrame | GeoParquetSource,
     *,
     engine: Engine | None = None,
     xdim: str = "x",
@@ -253,6 +298,17 @@ def rasterize(
             dtype=np.min_scalar_type(len(geometries)),
             fill=len(geometries),
             **rasterize_kwargs,
+        )
+    elif isinstance(geometries, GeoParquetSource):
+        rasterized = _rasterize_with_duckdb(
+            obj,
+            geometries,
+            affine=affine,
+            engine=resolved_engine,
+            xdim=xdim,
+            ydim=ydim,
+            all_touched=all_touched,
+            merge_alg=merge_alg,
         )
     else:
         from dask.array import from_array, map_blocks
