@@ -126,9 +126,7 @@ def get_affine(
 
     dx = (x[1] - x[0]).item()
     dy = (y[1] - y[0]).item()
-    return Affine.translation(
-        x[0].item() - dx / 2, (y[0] if dy < 0 else y[-1]).item() - dy / 2
-    ) * Affine.scale(dx, dy)
+    return Affine.translation(x[0].item() - dx / 2, y[0].item() - dy / 2) * Affine.scale(dx, dy)
 
 
 _ZarrConventionRegistration = TypedDict("_ZarrConventionRegistration", {"proj:": str})
