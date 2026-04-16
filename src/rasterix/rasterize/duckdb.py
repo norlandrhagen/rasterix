@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import numpy as np
 from affine import Affine
+
+if TYPE_CHECKING:
+    import pyarrow
 
 __all__: list[str] = []
 

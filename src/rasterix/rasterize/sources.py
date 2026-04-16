@@ -3,7 +3,11 @@ from __future__ import annotations
 import hashlib
 import threading
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    import duckdb
+    import pyarrow
 
 __all__ = ["GeoParquetSource"]
 
@@ -31,6 +35,7 @@ def _get_connection(duckdb_config: dict) -> duckdb.DuckDBPyConnection:
         con.install_extension("spatial")
         con.load_extension("spatial")
         con.execute("SET enable_progress_bar = false")
+        con.execute("SET enable_progress_bar_print = false")
         for k, v in duckdb_config.items():
             con.execute(f"SET {k} = '{v}'")
         cache[key] = con
@@ -217,13 +222,18 @@ class GeoParquetSource:
         # Build WHERE in two stages:
         #   1. bbox struct pre-filter (row-group stats skip entire groups).
         #   2. ST_Intersects (precise per-geometry filter).
+        # ST_GeomFromWKB(ST_AsWKB({g})) strips any SRID qualifier
+        # (e.g. GEOMETRY('EPSG:4326')) from the column before the intersection
+        # test.  Without this, DuckDB may silently return false when the column
+        # type carries an SRID tag and ST_MakeEnvelope returns plain GEOMETRY.
+        g_plain = f"ST_GeomFromWKB(ST_AsWKB({g}))"
         if self.bbox_column is not None:
             b = self.bbox_column
             bbox_filter = f"{b}.xmin <= ? AND {b}.xmax >= ? AND {b}.ymin <= ? AND {b}.ymax >= ?"
-            where = f"{bbox_filter} AND ST_Intersects({g}, ST_MakeEnvelope(?, ?, ?, ?))"
+            where = f"{bbox_filter} AND ST_Intersects({g_plain}, ST_MakeEnvelope(?, ?, ?, ?))"
             params: list = [xmax, xmin, ymax, ymin, xmin, ymin, xmax, ymax]
         else:
-            where = f"ST_Intersects({g}, ST_MakeEnvelope(?, ?, ?, ?))"
+            where = f"ST_Intersects({g_plain}, ST_MakeEnvelope(?, ?, ?, ?))"
             params = [xmin, ymin, xmax, ymax]
 
         if self.id_column is None:

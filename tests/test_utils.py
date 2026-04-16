@@ -67,7 +67,6 @@ class TestGetAffineCoordinateFallback:
         ds = _make_ds(lats, lons)
         aff = get_affine(ds, x_dim="lon", y_dim="lat")
 
-        dy = aff.e
         # Row 30 offset: y of pixel-center should be within [22, 52]
         _, y30 = aff * (0.5, 30.5)
         assert 22.0 <= y30 <= 52.0
