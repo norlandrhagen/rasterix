@@ -95,7 +95,7 @@ def _rusterize_chunk(
     all_touched: bool,
 ) -> np.ndarray:
     import polars as pl
-    import polars_st  # noqa: F401 — registers GeoSeries / geometry dtype
+    import polars_st  # noqa: F401 — registers .st accessor; rusterize calls .st.srid() internally
     import rusterize as rust
 
     from .rusterize import _affine_to_extent_and_res
@@ -103,12 +103,16 @@ def _rusterize_chunk(
     alg_map = {"replace": "last", "add": "sum"}
     fun = alg_map.get(merge_alg, merge_alg)
 
-    # Zero-copy: Arrow table → Polars DataFrame (both use Arrow memory layout).
-    # Rename to the column names rusterize expects, and downcast id to Int32.
+    # Zero-copy: Arrow → polars shares the same memory layout.
+    # polars_st.geom() re-registers the Binary WKB column as a geometry series
+    # so rusterize can call .st methods on it (e.g. .st.srid() internally).
+    # polars_st stores geometry as WKB, so this is a dtype annotation, not a
+    # conversion.  Keep "value" as Int64; output dtype is controlled via
+    # dtype="int32".
     df = (
         pl.from_arrow(arrow_tbl)
         .rename({"wkb": "geometry", "id": "value"})
-        .with_columns(pl.col("value").cast(pl.Int32))
+        .with_columns(polars_st.geom("geometry"))
     )
 
     extent, (xres, yres) = _affine_to_extent_and_res(chunk_affine, shape)

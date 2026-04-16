@@ -71,9 +71,14 @@ def _ensure_rtree_table(
 
     if not exists:
         g = geometry_column
+        # DuckDB reads GeoParquet geometry columns as GEOMETRY('EPSG:NNNN'),
+        # but R-Tree indexes require plain GEOMETRY without a CRS qualifier.
+        # ST_GeomFromWKB(ST_AsWKB(...)) round-trips through WKB bytes,
+        # stripping the CRS tag and yielding a plain GEOMETRY column.
         con.execute(f"""
             CREATE TABLE {table_name} AS
-            SELECT row_number() OVER () AS _auto_id, {g} AS geometry
+            SELECT row_number() OVER () - 1 AS _auto_id,
+                   ST_GeomFromWKB(ST_AsWKB({g})) AS geometry
             FROM read_parquet('{path}')
         """)
         con.execute(f"CREATE INDEX {index_name} ON {table_name} USING RTREE (geometry)")
@@ -102,9 +107,11 @@ class GeoParquetSource:
         Name of the geometry column in the parquet file.
     id_column : str or None
         Column to use as the integer feature ID burned into the output raster.
-        If ``None``, stable 1-based IDs are derived from physical file order
-        via ``row_number() OVER ()``.  The exact execution strategy (in-memory
-        R-Tree vs. CTE on ``read_parquet``) is controlled by ``use_rtree``.
+        If ``None``, stable 0-based IDs are derived from physical file order
+        via ``row_number() OVER () - 1``, matching the convention used by the
+        GeoDataFrame path of :func:`rasterize`.  The exact execution strategy
+        (in-memory R-Tree vs. CTE on ``read_parquet``) is controlled by
+        ``use_rtree``.
     bbox_column : str or None
         Name of a GeoParquet 1.1 covering-bbox struct column (typically
         ``"bbox"``), whose fields are ``xmin``, ``ymin``, ``xmax``, ``ymax``.
@@ -170,7 +177,8 @@ class GeoParquetSource:
         # thread-local storage so we only pay this cost once per worker thread.
         strategy_cache: dict = vars(_local).setdefault("strategies", {})
         if self.path not in strategy_cache:
-            n_rows = con.execute(f"SELECT sum(num_rows) FROM parquet_metadata('{self.path}')").fetchone()[0]
+            # parquet_file_metadata() reads only the file footer — no data scan.
+            n_rows = con.execute(f"SELECT num_rows FROM parquet_file_metadata('{self.path}')").fetchone()[0]
             strategy_cache[self.path] = "rtree" if n_rows < 5_000_000 else "parquet"
         return strategy_cache[self.path]
 
@@ -203,7 +211,7 @@ class GeoParquetSource:
                 FROM {tbl}
                 WHERE ST_Intersects(geometry, ST_MakeEnvelope(?, ?, ?, ?))
             """
-            return con.execute(sql, [xmin, ymin, xmax, ymax]).fetch_arrow_table()
+            return con.execute(sql, [xmin, ymin, xmax, ymax]).to_arrow_table()
 
         # --- parquet path ---------------------------------------------------
         # Build WHERE in two stages:
@@ -223,7 +231,7 @@ class GeoParquetSource:
             cte_extra_col = f", {self.bbox_column}" if self.bbox_column is not None else ""
             sql = f"""
                 WITH numbered AS (
-                    SELECT row_number() OVER () AS _auto_id,
+                    SELECT row_number() OVER () - 1 AS _auto_id,
                            ST_AsWKB({g}) AS wkb,
                            {g}{cte_extra_col}
                     FROM read_parquet('{self.path}')
@@ -239,4 +247,4 @@ class GeoParquetSource:
                 WHERE {where}
             """
 
-        return con.execute(sql, params).fetch_arrow_table()
+        return con.execute(sql, params).to_arrow_table()
