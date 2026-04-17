@@ -237,17 +237,14 @@ class GeoParquetSource:
             params = [xmin, ymin, xmax, ymax]
 
         if self.id_column is None:
-            # No natural ID: assign stable row numbers via CTE before filtering.
-            cte_extra_col = f", {self.bbox_column}" if self.bbox_column is not None else ""
+            # file_row_number is a DuckDB virtual column: computed from parquet
+            # footer metadata (row_group_offset + row_within_group), so it is
+            # stable and 0-based without requiring a full sequential scan.
+            # Unlike row_number() OVER (), the optimizer can still apply
+            # row-group pruning via bbox_column statistics before rows are read.
             sql = f"""
-                WITH numbered AS (
-                    SELECT row_number() OVER () - 1 AS _auto_id,
-                           ST_AsWKB({g}) AS wkb,
-                           {g}{cte_extra_col}
-                    FROM read_parquet('{self.path}')
-                )
-                SELECT wkb, CAST(_auto_id AS BIGINT) AS id
-                FROM numbered
+                SELECT ST_AsWKB({g}) AS wkb, CAST(file_row_number AS BIGINT) AS id
+                FROM read_parquet('{self.path}', file_row_number=true)
                 WHERE {where}
             """
         else:
