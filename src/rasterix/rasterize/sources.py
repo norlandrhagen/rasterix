@@ -148,6 +148,12 @@ class GeoParquetSource:
           - neither set → check row count via parquet footer metadata;
             use R-Tree if ``n_rows < 5_000_000``, else fall back to the CTE
             path.
+    crs : str or None
+        CRS of the geometry column, e.g. ``"EPSG:4326"``.  Not required for
+        :func:`rasterize` or for
+        ``coverage(coverage_weight="fraction"|"none"|"area_cartesian")``.
+        Required when calling :func:`coverage` with spherical area weights
+        (``"area_spherical_m2"`` / ``"area_spherical_km2"``).
     """
 
     path: str
@@ -156,6 +162,7 @@ class GeoParquetSource:
     bbox_column: str | None = None
     duckdb_config: dict = field(default_factory=dict)
     use_rtree: bool | None = None
+    crs: str | None = None
 
     def _resolve_strategy(self, con: duckdb.DuckDBPyConnection) -> Literal["rtree", "parquet"]:
         """Return the query strategy to use, applying heuristics when needed.
@@ -255,3 +262,15 @@ class GeoParquetSource:
             """
 
         return con.execute(sql, params).to_arrow_table()
+
+    def n_rows(self) -> int:
+        """Return the total number of rows in the parquet file.
+
+        Reads only the parquet file footer (no data scan), so the cost is
+        negligible (~1 ms).  Used by :func:`coverage` to determine the
+        geometry dimension size before any chunks are computed.
+        """
+        con = _get_connection(self.duckdb_config)
+        return con.execute(
+            f"SELECT num_rows FROM parquet_file_metadata('{self.path}')"
+        ).fetchone()[0]

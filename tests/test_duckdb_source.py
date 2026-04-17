@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pyproj
 import pytest
 import xarray as xr
 import xproj  # noqa: F401 — registers xproj accessor
@@ -274,3 +275,148 @@ def test_rasterize_geoparquet_lazy(tmp_path, dataset):
 
     with raise_if_dask_computes():
         _ = rasterize(chunked, source, xdim="longitude", ydim="latitude", engine="rasterio")
+
+
+# ---------------------------------------------------------------------------
+# Integration tests: coverage() with GeoParquetSource
+# ---------------------------------------------------------------------------
+
+
+def test_coverage_geoparquet_matches_gdf(tmp_path, dataset):
+    """DuckDB coverage output must match GeoDataFrame-based coverage pixel-for-pixel."""
+    pytest.importorskip("exactextract")
+    geodatasets = pytest.importorskip("geodatasets")
+    from rasterix.rasterize.exact import coverage
+
+    world_gdf = gpd.read_file(geodatasets.get_path("naturalearth land"))
+    path = str(tmp_path / "world.parquet")
+    world_gdf[["geometry"]].to_parquet(path)
+
+    chunked = dataset.chunk(latitude=119, longitude=-1)
+
+    expected = (
+        coverage(chunked, world_gdf[["geometry"]], xdim="longitude", ydim="latitude")
+        .compute()
+        .data.todense()
+    )
+
+    source = GeoParquetSource(path=path, crs="EPSG:4326")
+    actual = (
+        coverage(chunked, source, xdim="longitude", ydim="latitude")
+        .compute()
+        .data.todense()
+    )
+
+    np.testing.assert_array_equal(expected, actual)
+
+
+def test_coverage_geoparquet_lazy(tmp_path, dataset):
+    """coverage() with GeoParquetSource must not trigger dask computation."""
+    pytest.importorskip("exactextract")
+    from xarray.tests import raise_if_dask_computes
+
+    from rasterix.rasterize.exact import coverage
+
+    geodatasets = pytest.importorskip("geodatasets")
+    world_gdf = gpd.read_file(geodatasets.get_path("naturalearth land"))
+    path = str(tmp_path / "world.parquet")
+    world_gdf[["geometry"]].to_parquet(path)
+
+    chunked = dataset.chunk(latitude=119, longitude=-1)
+    source = GeoParquetSource(path=path, crs="EPSG:4326")
+
+    with raise_if_dask_computes():
+        result = coverage(chunked, source, xdim="longitude", ydim="latitude")
+
+    assert hasattr(result.data, "dask"), "output must be a dask-backed array"
+
+
+def test_coverage_geoparquet_global_id_placement(tmp_path):
+    """Each geometry must appear at its global file_row_number index in the output."""
+    pytest.importorskip("exactextract")
+    from rasterix.rasterize.exact import coverage
+
+    # Three non-overlapping 1×1 boxes; each will cover a distinct spatial region.
+    gdf = gpd.GeoDataFrame(
+        geometry=[box(0, 0, 1, 1), box(2, 2, 3, 3), box(5, 5, 6, 6)],
+        crs="EPSG:4326",
+    )
+    path = str(tmp_path / "boxes.parquet")
+    gdf.to_parquet(path)
+
+    # Build a small raster covering [0,7] × [0,7] at 0.5° resolution.
+    import xproj  # noqa: F401
+
+    ds = xr.Dataset(
+        coords={
+            "spatial_ref": ((), 0, pyproj.CRS.from_epsg(4326).to_cf()),
+            "x": (["x"], np.arange(0.25, 7, 0.5)),
+            "y": (["y"], np.arange(6.75, 0, -0.5)),
+        }
+    )
+    ds = ds.proj.assign_crs(spatial_ref="epsg:4326")
+    import rasterix
+
+    ds = rasterix.assign_index(ds)
+
+    source = GeoParquetSource(path=path, crs="EPSG:4326")
+    result = coverage(ds.chunk(x=7, y=7), source).compute()
+
+    for geom_idx, (xlo, ylo, xhi, yhi) in enumerate([(0, 0, 1, 1), (2, 2, 3, 3), (5, 5, 6, 6)]):
+        # The geometry at global index geom_idx must have non-zero coverage
+        # only within its own bounding box.
+        geom_slice = result.isel(geometry=geom_idx).data.todense()
+        x_vals = result.x.values
+        y_vals = result.y.values
+        inside_x = (x_vals >= xlo) & (x_vals <= xhi)
+        inside_y = (y_vals >= ylo) & (y_vals <= yhi)
+        outside_x = ~inside_x
+        outside_y = ~inside_y
+        # Non-zero coverage exists inside the box
+        assert geom_slice[np.ix_(inside_y, inside_x)].sum() > 0
+        # No coverage outside the box
+        assert geom_slice[np.ix_(outside_y, outside_x)].sum() == 0
+
+
+def test_coverage_geoparquet_empty_result(tmp_path, dataset):
+    """Coverage of a raster with no overlapping geometries must be all-zero."""
+    pytest.importorskip("exactextract")
+    from rasterix.rasterize.exact import coverage
+
+    gdf = gpd.GeoDataFrame(
+        geometry=[box(0, 0, 1, 1), box(2, 2, 3, 3)],
+        crs="EPSG:4326",
+    )
+    path = str(tmp_path / "boxes.parquet")
+    gdf.to_parquet(path)
+
+    # eraint_uvz covers the globe, so clip to a region far from both boxes.
+    # Boxes are at 0-3° lon/lat; select only 90-180° lon.
+    clipped = dataset.sel(longitude=slice(90, 180)).chunk(latitude=-1, longitude=90)
+    source = GeoParquetSource(path=path, crs="EPSG:4326")
+    result = coverage(clipped, source, xdim="longitude", ydim="latitude").compute()
+
+    assert result.data.nnz == 0, "expected no coverage for non-overlapping extent"
+
+
+@pytest.mark.parametrize("weight,expected_dtype", [("fraction", np.float64), ("none", np.uint8)])
+def test_coverage_geoparquet_dtype(tmp_path, dataset, weight, expected_dtype):
+    """coverage_weight controls output dtype: 'none' → uint8, others → float64."""
+    pytest.importorskip("exactextract")
+    from rasterix.rasterize.exact import coverage
+
+    geodatasets = pytest.importorskip("geodatasets")
+    world_gdf = gpd.read_file(geodatasets.get_path("naturalearth land"))
+    path = str(tmp_path / "world.parquet")
+    world_gdf[["geometry"]].to_parquet(path)
+
+    source = GeoParquetSource(path=path, crs="EPSG:4326")
+    result = coverage(
+        dataset.chunk(latitude=119, longitude=-1),
+        source,
+        xdim="longitude",
+        ydim="latitude",
+        coverage_weight=weight,
+    ).compute()
+
+    assert result.data.dtype == expected_dtype

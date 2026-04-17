@@ -182,6 +182,54 @@ def _rasterize_with_duckdb(
     )
 
 
+def _coverage_with_duckdb(
+    obj: xr.Dataset | xr.DataArray,
+    source: GeoParquetSource,
+    *,
+    affine,
+    xdim: str,
+    ydim: str,
+    coverage_weight: str,
+    strategy: str,
+) -> dask.array.Array:
+    """Per-chunk DuckDB spatial queries for coverage().
+
+    Always returns a lazy dask array backed by sparse COO blocks.  The geometry
+    dimension is a single chunk of size ``n_geoms``; each spatial chunk is an
+    independent task that queries only the geometries intersecting its bbox.
+    """
+    import dask.array as da
+    import sparse
+
+    from .duckdb import duckdb_coverage_chunk
+    from .exact import get_dtype
+
+    n_geoms = source.n_rows()
+    chunks_y = obj.chunksizes.get(ydim) or (obj.sizes[ydim],)
+    chunks_x = obj.chunksizes.get(xdim) or (obj.sizes[xdim],)
+    dtype = get_dtype(coverage_weight, None)
+
+    # 3D template: geometry dim is one chunk of n_geoms so map_blocks iterates
+    # over 1 × n_y_chunks × n_x_chunks tasks.  block_info["array-location"]
+    # gives [(0, n_geoms), (row_start, row_end), (col_start, col_end)].
+    template = da.empty(
+        (n_geoms, obj.sizes[ydim], obj.sizes[xdim]),
+        chunks=((n_geoms,), chunks_y, chunks_x),
+        dtype=dtype,
+    )
+    return da.map_blocks(
+        duckdb_coverage_chunk,
+        template,
+        dtype=dtype,
+        meta=sparse.COO([], data=np.array([], dtype=dtype), shape=(0, 0, 0), fill_value=0),
+        source=source,
+        raster_affine=affine,
+        n_geoms=n_geoms,
+        coverage_weight=coverage_weight,
+        strategy=strategy,
+    )
+
+
 def replace_values(array: np.ndarray, to, *, from_=0) -> np.ndarray:
     """Replace fill values and adjust offsets after dask rasterization."""
     mask = array == from_

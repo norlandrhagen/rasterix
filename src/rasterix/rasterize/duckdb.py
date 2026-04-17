@@ -159,6 +159,68 @@ def _exactextract_chunk(
     )
 
 
+def duckdb_coverage_chunk(
+    chunk: np.ndarray,
+    block_info: dict | None = None,
+    *,
+    source,
+    raster_affine: Affine,
+    n_geoms: int,
+    coverage_weight: str,
+    strategy: str,
+) -> "sparse.COO":
+    """``dask.array.map_blocks`` worker: query + coverage for one spatial chunk.
+
+    The template passed to map_blocks has shape ``(n_geoms, y, x)`` with the
+    geometry dimension as a single chunk, so ``block_info`` gives:
+    ``[(0, n_geoms), (row_start, row_end), (col_start, col_end)]``.
+
+    Returns a sparse COO of shape ``(n_geoms, chunk_h, chunk_w)`` with
+    geometry coordinates set to global ``file_row_number`` positions.
+    """
+    import geopandas as gpd
+    import shapely
+    import sparse
+
+    from .exact import np_coverage
+
+    # Geometry dim is dim 0 (single chunk of n_geoms); spatial dims are 1 and 2.
+    _, (row_start, row_end), (col_start, col_end) = block_info[0]["array-location"]
+    shape = (row_end - row_start, col_end - col_start)
+    dtype = np.uint8 if coverage_weight == "none" else np.float64
+
+    chunk_affine = raster_affine * Affine.translation(col_start, row_start)
+    xmin, ymin, xmax, ymax = _chunk_bbox(chunk_affine, shape)
+
+    arrow_tbl = source.query_bbox(xmin, ymin, xmax, ymax)
+
+    empty = sparse.COO([], data=np.array([], dtype=dtype), shape=(n_geoms, *shape), fill_value=0)
+
+    if arrow_tbl.num_rows == 0:
+        return empty
+
+    geoms = shapely.from_wkb(arrow_tbl.column("wkb").to_pylist())
+    global_ids = np.array(arrow_tbl.column("id").to_pylist(), dtype=np.intp)
+    local_gdf = gpd.GeoDataFrame({"geometry": geoms}, crs=source.crs)
+
+    local_coo = np_coverage(
+        chunk_affine,
+        shape=shape,
+        geometries=local_gdf,
+        strategy=strategy,
+        coverage_weight=coverage_weight,
+    )
+
+    if local_coo.nnz == 0:
+        return empty
+
+    # Remap local geom indices (0..k-1) → global file_row_number positions via
+    # NumPy fancy indexing: global_ids[local_idx] gives the parquet row number.
+    global_geom_coords = global_ids[local_coo.coords[0]]
+    new_coords = np.stack([global_geom_coords, local_coo.coords[1], local_coo.coords[2]])
+    return sparse.COO(new_coords, local_coo.data, shape=(n_geoms, *shape), fill_value=0)
+
+
 def _rasterio_chunk(
     arrow_tbl: pyarrow.Table,
     chunk_affine: Affine,

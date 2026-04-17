@@ -12,6 +12,7 @@ from exactextract.raster import NumPyRasterSource
 
 from ..rasterize.core import _get_affine
 from ..utils import get_grid_mapping_var
+from .sources import GeoParquetSource
 from .utils import clip_to_bbox, geometries_as_dask_array, is_in_memory
 
 if TYPE_CHECKING:
@@ -223,7 +224,7 @@ def dask_coverage(
 
 def coverage(
     obj: xr.Dataset | xr.DataArray,
-    geometries: gpd.GeoDataFrame | dask_geopandas.GeoDataFrame,
+    geometries: gpd.GeoDataFrame | dask_geopandas.GeoDataFrame | GeoParquetSource,
     *,
     xdim="x",
     ydim="y",
@@ -319,6 +320,25 @@ def coverage(
             strategy=strategy,
         )
         geom_array = geometries.to_numpy().squeeze(axis=1)
+    elif isinstance(geometries, GeoParquetSource):
+        if coverage_weight in ("area_spherical_m2", "area_spherical_km2") and geometries.crs is None:
+            raise ValueError(
+                f"coverage_weight={coverage_weight!r} requires a CRS. "
+                "Set crs= on GeoParquetSource, e.g. GeoParquetSource(path=..., crs='EPSG:4326')."
+            )
+        from .core import _coverage_with_duckdb
+
+        n_geoms = geometries.n_rows()
+        out = _coverage_with_duckdb(
+            obj,
+            geometries,
+            affine=affine,
+            xdim=xdim,
+            ydim=ydim,
+            coverage_weight=coverage_weight,
+            strategy=strategy,
+        )
+        geom_array = np.arange(n_geoms)
     else:
         geom_dask_array = geometries_as_dask_array(geometries)
 
