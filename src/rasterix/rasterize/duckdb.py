@@ -103,7 +103,7 @@ def _rusterize_chunk(
     import polars_st  # noqa: F401 — registers .st accessor; rusterize calls .st.srid() internally
     import rusterize as rust
 
-    from .rusterize import _affine_to_extent_and_res
+    from .rusterize import _affine_to_extent_and_res, _postprocess_rusterize_output
 
     alg_map = {"replace": "last", "add": "sum"}
     fun = alg_map.get(merge_alg, merge_alg)
@@ -133,8 +133,7 @@ def _rusterize_chunk(
         encoding="numpy",
         dtype="int32",
     )
-    if result.ndim == 3 and result.shape[0] == 1:
-        result = result.squeeze(axis=0)
+    result = _postprocess_rusterize_output(result, chunk_affine)
     return result.astype(np.int32)
 
 

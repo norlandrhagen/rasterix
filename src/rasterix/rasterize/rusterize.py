@@ -36,6 +36,21 @@ def _affine_to_extent_and_res(
     return (xmin, ymin, xmax, ymax), (abs(xres), abs(yres))
 
 
+def _postprocess_rusterize_output(result: np.ndarray, affine: Affine) -> np.ndarray:
+    """Squeeze rusterize's (1, nrows, ncols) output and flip for south-up grids.
+
+    rusterize ignores the sign of the affine resolutions and always returns a
+    north-up array (row 0 = ymax). When the target grid is south-up
+    (``affine.e > 0``, row 0 = ymin), its output is vertically reflected —
+    flip so row indices match the grid orientation.
+    """
+    if result.ndim == 3 and result.shape[0] == 1:
+        result = result.squeeze(axis=0)
+    if affine.e > 0:
+        result = result[::-1]
+    return result
+
+
 def rasterize_geometries(
     geometries: Sequence[Geometry],
     *,
@@ -100,9 +115,7 @@ def rasterize_geometries(
         dtype=str(dtype),
     )
 
-    # rusterize returns (1, nrows, ncols), squeeze to (nrows, ncols) if needed
-    if result.ndim == 3 and result.shape[0] == 1:
-        result = result.squeeze(axis=0)
+    result = _postprocess_rusterize_output(result, affine)
     assert result.shape == shape
     return result
 
@@ -194,9 +207,7 @@ def np_geometry_mask(
         dtype="uint8",
     )
 
-    # rusterize returns (1, nrows, ncols), squeeze to (nrows, ncols) if needed
-    if result.ndim == 3 and result.shape[0] == 1:
-        result = result.squeeze(axis=0)
+    result = _postprocess_rusterize_output(result, affine)
 
     # Convert to boolean mask
     # rasterio convention: True = outside geometry (masked), False = inside geometry
